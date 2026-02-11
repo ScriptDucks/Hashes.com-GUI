@@ -1,4 +1,4 @@
-A desktop GUI client to interact with the `https://hashes.com/` API and escrow service.
+A desktop GUI client to interact with the [https://hashes.com/](https://hashes.com/) API and escrow service.
 
 ## Usage
 ```bash
