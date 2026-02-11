@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import json
 import sys
@@ -8,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import requests
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -214,8 +216,8 @@ class HashesGuiApp(tk.Tk):
         )
         style.configure(
             "Treeview",
-            background=self.SURFACE_ALT,
-            fieldbackground=self.SURFACE_ALT,
+            background=self.SURFACE,
+            fieldbackground=self.SURFACE,
             foreground=self.TEXT,
             bordercolor=self.BORDER,
             rowheight=27,
@@ -302,6 +304,12 @@ class HashesGuiApp(tk.Tk):
         self.jobs_min_left_var = tk.StringVar(value=self.config_data.get("jobs_min_left", "0"))
         self.jobs_stats_var = tk.StringVar(value="No jobs loaded.")
 
+        stats_frame = ttk.Frame(self.jobs_tab, style="Card.TFrame", padding=(10, 8))
+        stats_frame.pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+        ttk.Label(stats_frame, textvariable=self.jobs_stats_var, style="Muted.TLabel").pack(
+            anchor="w"
+        )
+
         controls = ttk.Frame(self.jobs_tab, style="Card.TFrame", padding=(10, 10))
         controls.pack(fill="x", pady=(8, 8), padx=8)
 
@@ -365,8 +373,13 @@ class HashesGuiApp(tk.Tk):
         table_card.columnconfigure(0, weight=1)
         table_card.rowconfigure(0, weight=1)
 
+        tree_container = ttk.Frame(table_card)
+        tree_container.grid(row=0, column=0, sticky="nsew")
+        tree_container.columnconfigure(0, weight=1)
+        tree_container.rowconfigure(0, weight=1)
+
         self.jobs_columns = ("id", "created", "algorithm", "total", "found", "left", "currency", "price", "hints")
-        self.jobs_tree = ttk.Treeview(table_card, columns=self.jobs_columns, show="headings")
+        self.jobs_tree = ttk.Treeview(tree_container, columns=self.jobs_columns, show="headings")
         jobs_col_config = {
             "id": ("ID", 90, 30),
             "created": ("Created", 130, 50),
@@ -383,17 +396,18 @@ class HashesGuiApp(tk.Tk):
         for col in self.jobs_columns:
             title, def_w, min_w = jobs_col_config[col]
             self.jobs_tree.heading(col, text=title, anchor="w", command=lambda c=col: self._on_jobs_heading_click(c))
-            self.jobs_tree.column(col, width=int(saved_widths.get(col, def_w)), minwidth=min_w, anchor="w", stretch=False)
+            stretch = col == "hints"
+            self.jobs_tree.column(col, width=int(saved_widths.get(col, def_w)), minwidth=min_w, anchor="w", stretch=stretch)
         self._refresh_jobs_heading_labels()
 
-        y_scroll = ttk.Scrollbar(table_card, orient="vertical", command=self.jobs_tree.yview)
+        y_scroll = ttk.Scrollbar(tree_container, orient="vertical", command=self.jobs_tree.yview)
         x_scroll = ttk.Scrollbar(
             table_card, orient="horizontal", command=self.jobs_tree.xview
         )
         self.jobs_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
 
-        self.jobs_tree.grid(row=0, column=0, sticky="nsew")
-        y_scroll.grid(row=0, column=1, sticky="ns")
+        self.jobs_tree.pack(side="left", fill="both", expand=True)
+        y_scroll.pack(side="right", fill="y")
         x_scroll.grid(row=1, column=0, sticky="ew")
         self.jobs_tree.bind("<<TreeviewSelect>>", self._on_job_selected)
         self.jobs_tree.bind("<ButtonRelease-1>", self._on_layout_interaction, add="+")
@@ -402,9 +416,27 @@ class HashesGuiApp(tk.Tk):
 
         details_card.columnconfigure(0, weight=1)
         details_card.rowconfigure(1, weight=1)
-        ttk.Label(details_card, text="Selected Job Details", style="Muted.TLabel").grid(
-            row=0, column=0, sticky="w"
+        header_row = ttk.Frame(details_card)
+        header_row.grid(row=0, column=0, sticky="ew")
+        ttk.Label(header_row, text="Selected Job Details", style="Muted.TLabel").pack(
+            side="left"
         )
+        ttk.Button(
+            header_row, text="Quack", command=self._on_quack_clicked
+        ).pack(side="right", padx=(8, 0))
+        self._duck_photo: tk.PhotoImage | None = None
+        self._duck_placeholder = tk.Frame(
+            details_card, bg=self.SURFACE, highlightthickness=1, highlightbackground=self.BORDER
+        )
+        self._duck_placeholder.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+        self._duck_label = tk.Label(
+            self._duck_placeholder,
+            text="Loading duck…",
+            bg=self.SURFACE,
+            fg=self.MUTED,
+            font=(_default_font()[0], 10),
+        )
+        self._duck_label.pack(expand=True, fill="both", padx=8, pady=8)
         self.job_details = scrolledtext.ScrolledText(
             details_card,
             wrap="word",
@@ -421,12 +453,9 @@ class HashesGuiApp(tk.Tk):
         self.job_details.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
         self.job_details.insert("1.0", "Select a job row to view details.")
         self.job_details.configure(state="disabled")
+        self.job_details.grid_remove()
+        self._load_random_duck()
 
-        stats_frame = ttk.Frame(self.jobs_tab, style="Card.TFrame", padding=(10, 8))
-        stats_frame.pack(fill="x", padx=8, pady=(0, 8))
-        ttk.Label(stats_frame, textvariable=self.jobs_stats_var, style="Muted.TLabel").pack(
-            anchor="w"
-        )
         self.after(200, self._restore_jobs_pane_sash)
 
     def _build_hash_tools_tab(self) -> None:
@@ -524,9 +553,11 @@ class HashesGuiApp(tk.Tk):
         self.lookup_columns = lookup_columns
         lookup_cols = {"hash": (260, 50), "salt": (180, 40), "plaintext": (220, 50), "algorithm": (220, 50)}
         saved = self._load_column_widths("lookup_table_columns", {k: v[0] for k, v in lookup_cols.items()})
+        lookup_col_list = list(lookup_cols.keys())
         for col, (def_w, min_w) in lookup_cols.items():
             self.lookup_tree.heading(col, text=col.capitalize() if col != "plaintext" else "Plaintext", anchor="w")
-            self.lookup_tree.column(col, width=int(saved.get(col, def_w)), minwidth=min_w, anchor="w", stretch=False)
+            stretch = col == lookup_col_list[-1]
+            self.lookup_tree.column(col, width=int(saved.get(col, def_w)), minwidth=min_w, anchor="w", stretch=stretch)
 
         lookup_yscroll = ttk.Scrollbar(output_card, orient="vertical", command=self.lookup_tree.yview)
         lookup_xscroll = ttk.Scrollbar(output_card, orient="horizontal", command=self.lookup_tree.xview)
@@ -560,9 +591,11 @@ class HashesGuiApp(tk.Tk):
         self.balance_tree = ttk.Treeview(frame, columns=self.balance_columns, show="headings")
         bal_cols = {"currency": (160, 50), "amount": (220, 60), "usd": (220, 60)}
         saved = self._load_column_widths("balance_table_columns", {k: v[0] for k, v in bal_cols.items()})
+        bal_col_list = list(bal_cols.keys())
         for col, (def_w, min_w) in bal_cols.items():
             self.balance_tree.heading(col, text=col.upper() if col == "usd" else col.capitalize(), anchor="w")
-            self.balance_tree.column(col, width=int(saved.get(col, def_w)), minwidth=min_w, anchor="w", stretch=False)
+            stretch = col == bal_col_list[-1]
+            self.balance_tree.column(col, width=int(saved.get(col, def_w)), minwidth=min_w, anchor="w", stretch=stretch)
         bal_y_scroll = ttk.Scrollbar(frame, orient="vertical", command=self.balance_tree.yview)
         bal_x_scroll = ttk.Scrollbar(frame, orient="horizontal", command=self.balance_tree.xview)
         self.balance_tree.configure(yscrollcommand=bal_y_scroll.set, xscrollcommand=bal_x_scroll.set)
@@ -649,6 +682,55 @@ class HashesGuiApp(tk.Tk):
         self._set_status(f"{task_name} failed.")
         messagebox.showerror(task_name, display)
 
+    def _on_quack_clicked(self) -> None:
+        self.jobs_tree.selection_set(())
+        self._show_duck_placeholder()
+        self._load_random_duck()
+
+    def _load_random_duck(self) -> None:
+        def worker() -> tuple[str, bytes] | None:
+            try:
+                r = requests.get(
+                    "https://random-d.uk/api/random",
+                    params={"type": "gif"},
+                    timeout=10,
+                )
+                r.raise_for_status()
+                data = r.json()
+                url = data.get("url")
+                if not url:
+                    return None
+                img_r = requests.get(url, timeout=10)
+                img_r.raise_for_status()
+                return url, img_r.content
+            except Exception:
+                return None
+
+        def on_success(result: tuple[str, bytes] | None) -> None:
+            if not result:
+                self._duck_label.config(text="Select a job row to view details.")
+                return
+            _url, img_bytes = result
+            try:
+                b64 = base64.b64encode(img_bytes).decode("ascii")
+                photo = tk.PhotoImage(data=b64)
+            except (tk.TclError, ValueError):
+                self._duck_label.config(text="Select a job row to view details.")
+                return
+            self._duck_photo = photo
+            self._duck_label.config(image=photo, text="")
+            self._duck_label.image = photo
+
+        self._run_background(worker, on_success, task_name="Load duck")
+
+    def _show_duck_placeholder(self) -> None:
+        self.job_details.grid_remove()
+        self._duck_placeholder.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+
+    def _show_job_details(self) -> None:
+        self._duck_placeholder.grid_remove()
+        self.job_details.grid(row=1, column=0, sticky="nsew", pady=(6, 0))
+
     def refresh_jobs(self, show_feedback: bool = True) -> None:
         if self.jobs_loading:
             return
@@ -727,7 +809,7 @@ class HashesGuiApp(tk.Tk):
 
         self.filtered_jobs = filtered
         self._render_jobs(filtered)
-        self._update_jobs_stats(filtered)
+        self._refresh_jobs_stats_display()
 
     def _render_jobs(self, jobs: list[dict[str, Any]]) -> None:
         ordered_jobs = self._sorted_jobs(jobs)
@@ -793,12 +875,17 @@ class HashesGuiApp(tk.Tk):
     def _on_job_selected(self, _event: tk.Event) -> None:
         selected = self.jobs_tree.selection()
         if not selected:
-            self._set_job_details("Select a job row to view details.")
+            self._show_duck_placeholder()
+            self._refresh_jobs_stats_display()
             return
         job = self.job_index.get(selected[0])
         if not job:
+            self._show_job_details()
             self._set_job_details("Details unavailable.")
+            self._refresh_jobs_stats_display()
             return
+        self._show_job_details()
+        self._refresh_jobs_stats_display()
         lines = [
             f"Job ID: {job.get('id', '-')}",
             f"Created: {job.get('createdAt', '-')}",
@@ -825,7 +912,16 @@ class HashesGuiApp(tk.Tk):
         self.job_details.insert("1.0", text)
         self.job_details.configure(state="disabled")
 
-    def _update_jobs_stats(self, jobs: list[dict[str, Any]]) -> None:
+    def _refresh_jobs_stats_display(self) -> None:
+        selected_ids = self.jobs_tree.selection()
+        if selected_ids:
+            selected_jobs = [self.job_index[sid] for sid in selected_ids if sid in self.job_index]
+            if selected_jobs:
+                self._update_jobs_stats(selected_jobs, label="Selected jobs")
+                return
+        self._update_jobs_stats(self.filtered_jobs, label="Visible jobs")
+
+    def _update_jobs_stats(self, jobs: list[dict[str, Any]], *, label: str = "Visible jobs") -> None:
         if not jobs:
             self.jobs_stats_var.set("No matching jobs.")
             return
@@ -855,7 +951,7 @@ class HashesGuiApp(tk.Tk):
             for currency, amount in sorted(crypto_totals.items(), key=lambda item: item[0])
         )
         self.jobs_stats_var.set(
-            f"Visible jobs: {len(jobs)} | Left: {total_left} | Found: {total_found} | "
+            f"{label}: {len(jobs)} | Left: {total_left} | Found: {total_found} | "
             f"Est. USD value: ${total_estimated_usd:.3f} | {crypto_bits}"
         )
 
